@@ -10,7 +10,7 @@ WeatherEdge is a Python, PostgreSQL, and Streamlit dashboard for identifying pos
 - Conservative probability calibration
 - Expected value and bankroll-based bet sizing
 - KPI summary cards for money in, expected profit, and ROI
-- “Real bet” vs watchlist workflow
+- "Real bet" vs watchlist workflow
 
 ## Stack
 
@@ -72,21 +72,7 @@ pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
 
-If `requirements.txt` does not exist yet, use:
-
-```bash
-pip install streamlit pandas numpy sqlalchemy psycopg2-binary python-dotenv scikit-learn plotly
-```
-
-Then save them:
-
-```bash
-pip freeze > requirements.txt
-```
-
 ### 4. Configure environment variables
-
-Copy the example file and fill in your local settings:
 
 ```bash
 cp .env.example .env
@@ -100,30 +86,18 @@ DATABASE_URL=postgresql+psycopg2://YOUR_USERNAME@localhost:5432/weatheredge
 
 ### 5. Make sure PostgreSQL is available
 
-Test the database connection:
-
 ```bash
 psql -h localhost -p 5432 -U YOUR_USERNAME -d weatheredge -c "SELECT COUNT(*) FROM market_data;"
 ```
 
 ## Run the dashboard
 
-From the repo root:
-
 ```bash
 source .venv/bin/activate
-streamlit run src/dashboard/app.py
-```
-
-If you hit package import issues, this launch form is the safest:
-
-```bash
 PYTHONPATH=. streamlit run src/dashboard/app.py
 ```
 
 ## Daily workflow
-
-This is the recommended day-to-day routine.
 
 ### Morning
 
@@ -170,7 +144,7 @@ git push origin main
 
 ## Current calibration approach
 
-The current version uses conservative shrinkage toward market probability and coin-flip probability instead of making expensive row-by-row historical weather API calls in the dashboard. This keeps runtime fast and avoids unstable rerun behavior while still reducing overconfidence in raw model outputs.
+The current version uses conservative shrinkage calibration (toward market probability and coin-flip) instead of row-by-row historical weather API calls in the dashboard. This keeps runtime fast and avoids unstable rerun behavior while still reducing overconfidence in raw model outputs.
 
 ## Current limitations
 
