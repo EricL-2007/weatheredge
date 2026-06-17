@@ -19,7 +19,6 @@ from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import log_loss, brier_score_loss, roc_auc_score
-from sklearn.model_selection import train_test_split
 
 try:
     from xgboost import XGBClassifier
@@ -301,6 +300,10 @@ for c in ["implied_probability", "model_probability", "edge", "ev_yes", "price_u
     if c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
+for c in ["fetched_at", "ev_updated_at"]:
+    if c in df.columns:
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+
 df = df.dropna(subset=["implied_probability", "model_probability"]).copy()
 df = df[(df["implied_probability"] > 0) & (df["implied_probability"] < 1)].copy()
 
@@ -378,7 +381,6 @@ min_edge_to_bet = st.sidebar.number_input(
     "Minimum edge to bet",
     min_value=0.0,
     max_value=1.0,
-    value=float(st.session_state.min_edge_to_bet),
     step=0.005,
     format="%.3f",
     key="min_edge_to_bet",
@@ -388,7 +390,6 @@ min_win_probability = st.sidebar.number_input(
     "Minimum win probability",
     min_value=0.0,
     max_value=1.0,
-    value=float(st.session_state.min_win_probability),
     step=0.01,
     format="%.2f",
     key="min_win_probability",
@@ -404,7 +405,6 @@ watchlist_confidence = st.sidebar.number_input(
     "Watchlist min confidence",
     min_value=0.50,
     max_value=1.00,
-    value=float(st.session_state.watchlist_confidence),
     step=0.01,
     format="%.2f",
     key="watchlist_confidence",
@@ -417,20 +417,20 @@ st.sidebar.header("Bet sizing")
 bankroll = st.sidebar.number_input(
     "Bankroll ($)",
     min_value=0.0,
-    value=float(st.session_state.bankroll),
     key="bankroll"
 )
+
 kelly_fraction = st.sidebar.selectbox("Kelly fraction", [1.0, 0.5, 0.25, 0.1], index=2)
+
 min_bet_floor = st.sidebar.number_input(
     "Minimum real-bet floor ($)",
     min_value=0.0,
-    value=float(st.session_state.min_bet_floor),
     key="min_bet_floor"
 )
+
 watchlist_stake = st.sidebar.number_input(
     "Watchlist manual stake ($)",
     min_value=0.0,
-    value=float(st.session_state.watchlist_stake),
     key="watchlist_stake"
 )
 
@@ -730,7 +730,6 @@ d3.metric("Calibration log loss", f"{calibration_metrics['log_loss']:.4f}" if ca
 d4.metric("Calibration Brier", f"{calibration_metrics['brier_score']:.4f}" if calibration_metrics else "N/A")
 d5.metric("EV correlation", f"{ev_corr:.4f}" if pd.notna(ev_corr) else "N/A")
 
-st.error("DEBUG: YOU REACHED BENCHMARK")
 st.subheader("Model benchmark")
 
 benchmark_df = filtered.copy()
@@ -763,8 +762,12 @@ else:
             .str.strip()
             .str.lower()
             .map({
-                "yes": 1, "true": 1, "1": 1,
-                "no": 0, "false": 0, "0": 0,
+                "yes": 1,
+                "true": 1,
+                "1": 1,
+                "no": 0,
+                "false": 0,
+                "0": 0,
             })
         )
 
@@ -993,7 +996,7 @@ with c1:
             title="Displayed rows by model family"
         )
         fig_family.update_layout(margin=dict(l=20, r=20, t=50, b=20))
-        st.plotly_chart(fig_family, use_container_width=True)
+        st.plotly_chart(fig_family, width="stretch")
     else:
         st.info("No rows available.")
 
@@ -1016,7 +1019,7 @@ with c2:
             line=dict(dash="dash")
         )
         fig_scatter.update_layout(margin=dict(l=20, r=20, t=50, b=20))
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(fig_scatter, width="stretch")
     else:
         st.info("No supported modeled rows available for the scatter plot.")
 
@@ -1034,7 +1037,7 @@ with c3:
             title="Calibrated model probability - market probability"
         )
         fig_gap.update_layout(margin=dict(l=20, r=20, t=50, b=20))
-        st.plotly_chart(fig_gap, use_container_width=True)
+        st.plotly_chart(fig_gap, width="stretch")
     else:
         st.info("No probability gap data available.")
 
@@ -1051,7 +1054,7 @@ with c4:
             title="Expected value by chosen side"
         )
         fig_ev.update_layout(margin=dict(l=20, r=20, t=50, b=20))
-        st.plotly_chart(fig_ev, use_container_width=True)
+        st.plotly_chart(fig_ev, width="stretch")
     else:
         st.info("No EV data available.")
 
@@ -1078,7 +1081,7 @@ show_cols = [
 
 st.dataframe(
     display_df[show_cols],
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "question": st.column_config.TextColumn("Question", width="large"),

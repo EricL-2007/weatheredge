@@ -19,7 +19,6 @@ from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import log_loss, brier_score_loss, roc_auc_score
-from sklearn.model_selection import train_test_split
 
 try:
     from xgboost import XGBClassifier
@@ -301,6 +300,10 @@ for c in ["implied_probability", "model_probability", "edge", "ev_yes", "price_u
     if c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
+for c in ["fetched_at", "ev_updated_at"]:
+    if c in df.columns:
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+
 df = df.dropna(subset=["implied_probability", "model_probability"]).copy()
 df = df[(df["implied_probability"] > 0) & (df["implied_probability"] < 1)].copy()
 
@@ -378,7 +381,6 @@ min_edge_to_bet = st.sidebar.number_input(
     "Minimum edge to bet",
     min_value=0.0,
     max_value=1.0,
-    value=float(st.session_state.min_edge_to_bet),
     step=0.005,
     format="%.3f",
     key="min_edge_to_bet",
@@ -388,7 +390,6 @@ min_win_probability = st.sidebar.number_input(
     "Minimum win probability",
     min_value=0.0,
     max_value=1.0,
-    value=float(st.session_state.min_win_probability),
     step=0.01,
     format="%.2f",
     key="min_win_probability",
@@ -404,7 +405,6 @@ watchlist_confidence = st.sidebar.number_input(
     "Watchlist min confidence",
     min_value=0.50,
     max_value=1.00,
-    value=float(st.session_state.watchlist_confidence),
     step=0.01,
     format="%.2f",
     key="watchlist_confidence",
@@ -417,20 +417,20 @@ st.sidebar.header("Bet sizing")
 bankroll = st.sidebar.number_input(
     "Bankroll ($)",
     min_value=0.0,
-    value=float(st.session_state.bankroll),
     key="bankroll"
 )
+
 kelly_fraction = st.sidebar.selectbox("Kelly fraction", [1.0, 0.5, 0.25, 0.1], index=2)
+
 min_bet_floor = st.sidebar.number_input(
     "Minimum real-bet floor ($)",
     min_value=0.0,
-    value=float(st.session_state.min_bet_floor),
     key="min_bet_floor"
 )
+
 watchlist_stake = st.sidebar.number_input(
     "Watchlist manual stake ($)",
     min_value=0.0,
-    value=float(st.session_state.watchlist_stake),
     key="watchlist_stake"
 )
 
@@ -730,16 +730,40 @@ d3.metric("Calibration log loss", f"{calibration_metrics['log_loss']:.4f}" if ca
 d4.metric("Calibration Brier", f"{calibration_metrics['brier_score']:.4f}" if calibration_metrics else "N/A")
 d5.metric("EV correlation", f"{ev_corr:.4f}" if pd.notna(ev_corr) else "N/A")
 
-st.error("DEBUG: YOU REACHED BENCHMARK")
 st.subheader("Model benchmark")
 
 benchmark_df = filtered.copy()
+benchmark_df["target"] = np.where(
+    benchmark_df["bet_side"] == "YES",
+    1,
+    np.where(benchmark_df["bet_side"] == "NO", 0, np.nan)
+)
 
-resolved_target_col = None
-for c in ["resolved_outcome", "actual_outcome", "settled_outcome", "result"]:
+time_col = None
+for c in ["ev_updated_at", "fetched_at"]:
     if c in benchmark_df.columns:
-        resolved_target_col = c
-        break
+        benchmark_df[c] = pd.to_datetime(benchmark_df[c], errors="coerce")
+        if benchmark_df[c].notna().sum() > 0:
+            time_col = c
+            break
+
+feature_cols = [
+    "implied_probability",
+    "model_probability",
+    "historical_probability",
+    "target_low",
+    "target_high",
+    "month_num",
+    "day_num",
+    "hour_24",
+]
+
+model_benchmark = benchmark_df.dropna(subset=["target"]).copy()
+model_benchmark = model_benchmark[model_benchmark["model_supported"]].copy()
+
+for col in feature_cols:
+    if col not in model_benchmark.columns:
+        model_benchmark[col] = np.nan
 
 benchmark_results_df = pd.DataFrame(columns=[
     "model", "log_loss", "brier_score", "roc_auc", "avg_pred", "test_rows", "status"
@@ -748,184 +772,103 @@ benchmark_results_df = pd.DataFrame(columns=[
 benchmark_warning = None
 benchmark_caption = None
 
-if resolved_target_col is None:
-    benchmark_warning = (
-        "Benchmark disabled: no real resolved outcome column found. "
-        "Current YES/NO bet decisions are strategy outputs, not ground-truth labels."
-    )
+if len(model_benchmark) < 80:
+    benchmark_warning = f"Not enough labeled rows for benchmark comparison yet ({len(model_benchmark)} rows)."
+elif model_benchmark["target"].nunique() < 2:
+    benchmark_warning = "Benchmark needs both YES and NO targets to compare classifiers."
+elif time_col is None:
+    benchmark_warning = "Benchmark skipped: no usable timestamp column for time-based holdout."
 else:
-    benchmark_df["target"] = benchmark_df[resolved_target_col]
+    model_benchmark = model_benchmark.sort_values(time_col).copy()
 
-    if benchmark_df["target"].dtype == "object":
-        benchmark_df["target"] = (
-            benchmark_df["target"]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .map({
-                "yes": 1, "true": 1, "1": 1,
-                "no": 0, "false": 0, "0": 0,
-            })
+    split_idx = int(len(model_benchmark) * 0.80)
+    train_df = model_benchmark.iloc[:split_idx].copy()
+    test_df = model_benchmark.iloc[split_idx:].copy()
+
+    if len(train_df) < 50 or len(test_df) < 20:
+        benchmark_warning = (
+            f"Benchmark skipped: train/test split too small "
+            f"(train={len(train_df)}, test={len(test_df)})."
         )
-
-    benchmark_df["target"] = pd.to_numeric(benchmark_df["target"], errors="coerce")
-
-    time_col = None
-    for c in ["ev_updated_at", "fetched_at"]:
-        if c in benchmark_df.columns:
-            benchmark_df[c] = pd.to_datetime(benchmark_df[c], errors="coerce")
-            if benchmark_df[c].notna().sum() > 0:
-                time_col = c
-                break
-
-    feature_cols = [
-        "implied_probability",
-        "model_probability",
-        "historical_probability",
-        "target_low",
-        "target_high",
-        "month_num",
-        "day_num",
-        "hour_24",
-    ]
-
-    model_benchmark = benchmark_df.dropna(subset=["target"]).copy()
-    model_benchmark = model_benchmark[model_benchmark["model_supported"]].copy()
-
-    for col in feature_cols:
-        if col not in model_benchmark.columns:
-            model_benchmark[col] = np.nan
-
-    def _group_text(v):
-        if pd.isna(v):
-            return "NA"
-        if isinstance(v, float):
-            return f"{v:.3f}"
-        return str(v).strip().lower()
-
-    model_benchmark["benchmark_group"] = model_benchmark.apply(
-        lambda row: " | ".join([
-            _group_text(row.get("question")),
-            _group_text(row.get("resolved_city")),
-            _group_text(row.get("market_family")),
-            _group_text(row.get("target_type")),
-            _group_text(row.get("target_low")),
-            _group_text(row.get("target_high")),
-        ]),
-        axis=1,
-    )
-
-    if len(model_benchmark) < 80:
-        benchmark_warning = f"Not enough resolved labeled rows for benchmark comparison yet ({len(model_benchmark)} rows)."
-    elif model_benchmark["target"].nunique() < 2:
-        benchmark_warning = "Benchmark needs both outcome classes in resolved data."
-    elif time_col is None:
-        benchmark_warning = "Benchmark skipped: no usable timestamp column for grouped time holdout."
+    elif train_df["target"].nunique() < 2 or test_df["target"].nunique() < 2:
+        benchmark_warning = "Benchmark skipped: both train and test need YES and NO targets."
     else:
-        group_time_df = (
-            model_benchmark
-            .groupby("benchmark_group", as_index=False)[time_col]
-            .min()
-            .sort_values(time_col)
-            .reset_index(drop=True)
+        X_train = train_df[feature_cols].copy()
+        y_train = train_df["target"].astype(int).copy()
+        X_test = test_df[feature_cols].copy()
+        y_test = test_df["target"].astype(int).copy()
+
+        imputer = SimpleImputer(strategy="median")
+        X_train_imp = imputer.fit_transform(X_train)
+        X_test_imp = imputer.transform(X_test)
+
+        benchmark_rows = []
+
+        models = {
+            "Baseline": DummyClassifier(strategy="prior"),
+            "Random Forest": RandomForestClassifier(
+                n_estimators=200,
+                max_depth=6,
+                min_samples_leaf=10,
+                random_state=42,
+                n_jobs=-1,
+            ),
+        }
+
+        if HAS_XGBOOST:
+            models["XGBoost"] = XGBClassifier(
+                n_estimators=200,
+                max_depth=4,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_lambda=1.0,
+                eval_metric="logloss",
+                random_state=42,
+            )
+
+        for model_name, model in models.items():
+            try:
+                model.fit(X_train_imp, y_train)
+                pred_prob = model.predict_proba(X_test_imp)[:, 1]
+                pred_prob = np.clip(pred_prob, 1e-6, 1 - 1e-6)
+
+                benchmark_rows.append({
+                    "model": model_name,
+                    "log_loss": float(log_loss(y_test, pred_prob)),
+                    "brier_score": float(brier_score_loss(y_test, pred_prob)),
+                    "roc_auc": float(roc_auc_score(y_test, pred_prob)),
+                    "avg_pred": float(np.mean(pred_prob)),
+                    "test_rows": int(len(y_test)),
+                    "status": "ok",
+                })
+            except Exception as model_error:
+                benchmark_rows.append({
+                    "model": model_name,
+                    "log_loss": np.nan,
+                    "brier_score": np.nan,
+                    "roc_auc": np.nan,
+                    "avg_pred": np.nan,
+                    "test_rows": int(len(y_test)),
+                    "status": f"error: {str(model_error)[:80]}",
+                })
+
+        benchmark_results_df = pd.DataFrame(benchmark_rows)
+
+        if not benchmark_results_df.empty:
+            benchmark_results_df = benchmark_results_df.sort_values(
+                by=["log_loss", "brier_score"],
+                ascending=[True, True],
+                na_position="last"
+            ).reset_index(drop=True)
+
+        benchmark_caption = (
+            f"Benchmark holdout: trained on oldest {len(train_df)} rows, "
+            f"tested on newest {len(test_df)} rows using `{time_col}`."
         )
-
-        if len(group_time_df) < 10:
-            benchmark_warning = f"Benchmark skipped: not enough distinct resolved groups ({len(group_time_df)})."
-        else:
-            split_idx = int(len(group_time_df) * 0.80)
-            split_idx = max(1, min(split_idx, len(group_time_df) - 1))
-
-            train_groups = set(group_time_df.iloc[:split_idx]["benchmark_group"])
-            test_groups = set(group_time_df.iloc[split_idx:]["benchmark_group"])
-
-            train_df = model_benchmark[model_benchmark["benchmark_group"].isin(train_groups)].copy()
-            test_df = model_benchmark[model_benchmark["benchmark_group"].isin(test_groups)].copy()
-
-            if len(train_df) < 50 or len(test_df) < 20:
-                benchmark_warning = (
-                    f"Benchmark skipped: grouped train/test split too small "
-                    f"(train={len(train_df)}, test={len(test_df)})."
-                )
-            elif train_df["target"].nunique() < 2 or test_df["target"].nunique() < 2:
-                benchmark_warning = "Benchmark skipped: both grouped train and test need both outcome classes."
-            else:
-                X_train = train_df[feature_cols].copy()
-                y_train = train_df["target"].astype(int).copy()
-                X_test = test_df[feature_cols].copy()
-                y_test = test_df["target"].astype(int).copy()
-
-                imputer = SimpleImputer(strategy="median")
-                X_train_imp = imputer.fit_transform(X_train)
-                X_test_imp = imputer.transform(X_test)
-
-                benchmark_rows = []
-
-                models = {
-                    "Baseline": DummyClassifier(strategy="prior"),
-                    "Random Forest": RandomForestClassifier(
-                        n_estimators=200,
-                        max_depth=6,
-                        min_samples_leaf=10,
-                        random_state=42,
-                        n_jobs=-1,
-                    ),
-                }
-
-                if HAS_XGBOOST:
-                    models["XGBoost"] = XGBClassifier(
-                        n_estimators=200,
-                        max_depth=4,
-                        learning_rate=0.05,
-                        subsample=0.8,
-                        colsample_bytree=0.8,
-                        reg_lambda=1.0,
-                        eval_metric="logloss",
-                        random_state=42,
-                    )
-
-                for model_name, model in models.items():
-                    try:
-                        model.fit(X_train_imp, y_train)
-                        pred_prob = model.predict_proba(X_test_imp)[:, 1]
-                        pred_prob = np.clip(pred_prob, 1e-6, 1 - 1e-6)
-
-                        benchmark_rows.append({
-                            "model": model_name,
-                            "log_loss": float(log_loss(y_test, pred_prob)),
-                            "brier_score": float(brier_score_loss(y_test, pred_prob)),
-                            "roc_auc": float(roc_auc_score(y_test, pred_prob)),
-                            "avg_pred": float(np.mean(pred_prob)),
-                            "test_rows": int(len(y_test)),
-                            "status": "ok",
-                        })
-                    except Exception as model_error:
-                        benchmark_rows.append({
-                            "model": model_name,
-                            "log_loss": np.nan,
-                            "brier_score": np.nan,
-                            "roc_auc": np.nan,
-                            "avg_pred": np.nan,
-                            "test_rows": int(len(y_test)),
-                            "status": f"error: {str(model_error)[:80]}",
-                        })
-
-                benchmark_results_df = pd.DataFrame(benchmark_rows)
-
-                if not benchmark_results_df.empty:
-                    benchmark_results_df = benchmark_results_df.sort_values(
-                        by=["log_loss", "brier_score"],
-                        ascending=[True, True],
-                        na_position="last"
-                    ).reset_index(drop=True)
-
-                benchmark_caption = (
-                    f"Resolved grouped holdout: trained on {len(train_groups)} oldest groups / {len(train_df)} rows, "
-                    f"tested on {len(test_groups)} newest groups / {len(test_df)} rows using `{time_col}`."
-                )
 
 if benchmark_warning:
-    st.warning(benchmark_warning)
+    st.info(benchmark_warning)
 
 if benchmark_caption:
     st.caption(benchmark_caption)
@@ -976,7 +919,7 @@ if not benchmark_results_df.empty:
         }
     )
 else:
-    st.caption("No trustworthy benchmark results to display yet.")
+    st.caption("No benchmark results to display yet.")
 
 c1, c2 = st.columns(2)
 
@@ -993,7 +936,7 @@ with c1:
             title="Displayed rows by model family"
         )
         fig_family.update_layout(margin=dict(l=20, r=20, t=50, b=20))
-        st.plotly_chart(fig_family, use_container_width=True)
+        st.plotly_chart(fig_family, width="stretch")
     else:
         st.info("No rows available.")
 
@@ -1016,7 +959,7 @@ with c2:
             line=dict(dash="dash")
         )
         fig_scatter.update_layout(margin=dict(l=20, r=20, t=50, b=20))
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(fig_scatter, width="stretch")
     else:
         st.info("No supported modeled rows available for the scatter plot.")
 
@@ -1034,7 +977,7 @@ with c3:
             title="Calibrated model probability - market probability"
         )
         fig_gap.update_layout(margin=dict(l=20, r=20, t=50, b=20))
-        st.plotly_chart(fig_gap, use_container_width=True)
+        st.plotly_chart(fig_gap, width="stretch")
     else:
         st.info("No probability gap data available.")
 
@@ -1051,7 +994,7 @@ with c4:
             title="Expected value by chosen side"
         )
         fig_ev.update_layout(margin=dict(l=20, r=20, t=50, b=20))
-        st.plotly_chart(fig_ev, use_container_width=True)
+        st.plotly_chart(fig_ev, width="stretch")
     else:
         st.info("No EV data available.")
 
@@ -1078,7 +1021,7 @@ show_cols = [
 
 st.dataframe(
     display_df[show_cols],
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "question": st.column_config.TextColumn("Question", width="large"),

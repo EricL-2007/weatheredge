@@ -15,18 +15,6 @@ import streamlit as st
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-from sklearn.dummy import DummyClassifier
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.impute import SimpleImputer
-from sklearn.metrics import log_loss, brier_score_loss, roc_auc_score
-from sklearn.model_selection import train_test_split
-
-try:
-    from xgboost import XGBClassifier
-    HAS_XGBOOST = True
-except Exception:
-    HAS_XGBOOST = False
-
 from src.models.weather_calibration import (
     run_calibration_on_dashboard_df,
     compute_sane_recommended_bet,
@@ -61,7 +49,6 @@ CITY_BASELINES = {
     "Miami": {"summer_high": 89, "summer_low": 78},
 }
 
-
 @st.cache_data(ttl=300)
 def load_data():
     query = """
@@ -83,7 +70,6 @@ def load_data():
     """
     with engine.connect() as conn:
         return pd.read_sql(text(query), conn)
-
 
 def extract_market_numbers(question: str):
     try:
@@ -119,7 +105,6 @@ def extract_market_numbers(question: str):
         return pd.Series([np.nan, np.nan, None])
     except Exception:
         return pd.Series([np.nan, np.nan, None])
-
 
 def extract_datetime_info(question: str):
     try:
@@ -158,7 +143,6 @@ def extract_datetime_info(question: str):
     except Exception:
         return pd.Series([None, None, None])
 
-
 def infer_city(question, fallback_city):
     if isinstance(fallback_city, str) and fallback_city.strip() and fallback_city.strip() in KNOWN_CITIES:
         return fallback_city.strip()
@@ -166,13 +150,12 @@ def infer_city(question, fallback_city):
     if not isinstance(question, str):
         return None
 
-    normalized = question.lower().replace("new york city", "new york").replace("nyc", "new york")
+    normalized = question.lower().replace("new york city", "new york")
     for city in sorted(KNOWN_CITIES, key=len, reverse=True):
         if city.lower() in normalized:
             return city
 
     return None
-
 
 def classify_market_family(question: str, market_type: str, city_name: str, target_type: str):
     q = question.lower() if isinstance(question, str) else ""
@@ -195,14 +178,12 @@ def classify_market_family(question: str, market_type: str, city_name: str, targ
 
     return "unknown"
 
-
 def norm_cdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
 
-
 def estimate_hourly_temp(city, month_num, hour_24):
     baseline = CITY_BASELINES.get(city)
-    if baseline is None or month_num is None:
+    if baseline is None:
         return np.nan
 
     high = baseline["summer_high"]
@@ -235,7 +216,6 @@ def estimate_hourly_temp(city, month_num, hour_24):
     }
     return hour_curve.get(hour_24, (high + low) / 2)
 
-
 def weather_probability_from_threshold(row, temp_sd=4.5):
     try:
         if row.get("market_family") != "temperature":
@@ -254,21 +234,20 @@ def weather_probability_from_threshold(row, temp_sd=4.5):
 
         if target_type == "greater_than" and pd.notna(target_low):
             z = (target_low - mean_temp) / temp_sd
-            return float(1 - norm_cdf(z))
+            return 1 - norm_cdf(z)
 
         if target_type == "less_than" and pd.notna(target_low):
             z = (target_low - mean_temp) / temp_sd
-            return float(norm_cdf(z))
+            return norm_cdf(z)
 
         if target_type == "range" and pd.notna(target_low) and pd.notna(target_high):
             z_low = (target_low - mean_temp) / temp_sd
             z_high = (target_high - mean_temp) / temp_sd
-            return float(max(0.0, norm_cdf(z_high) - norm_cdf(z_low)))
+            return max(0.0, norm_cdf(z_high) - norm_cdf(z_low))
 
         return np.nan
     except Exception:
         return np.nan
-
 
 def safe_corr(a, b):
     a = pd.to_numeric(a, errors="coerce")
@@ -279,7 +258,6 @@ def safe_corr(a, b):
     if a[mask].nunique() <= 1 or b[mask].nunique() <= 1:
         return np.nan
     return float(a[mask].corr(b[mask]))
-
 
 def classify_model_health(row):
     prob = row.get("calibrated_model_probability", row.get("enhanced_model_probability"))
@@ -293,7 +271,6 @@ def classify_model_health(row):
     if gap >= 0.08:
         return "moderate_disagreement"
     return "aligned"
-
 
 df = load_data().copy()
 
@@ -340,7 +317,7 @@ df["enhanced_model_probability"] = np.where(
         market_weight * df["implied_probability"] +
         existing_model_weight * df["model_probability"]
     ),
-    df["model_probability"]
+    df["model_probability"]  # fallback to original model if not supported
 )
 
 df["no_market_probability"] = 1 - df["implied_probability"]
@@ -459,11 +436,7 @@ df["best_edge"] = np.select(
     default=np.nan
 )
 
-df["best_ev"] = np.select(
-    [df["bet_side"] == "YES", df["bet_side"] == "NO"],
-    [df["yes_edge"], df["no_edge"]],
-    default=np.nan
-)
+df["best_ev"] = df["best_edge"].abs()  # EV should always be positive for the chosen side
 
 df["market_price_for_bet"] = np.select(
     [df["bet_side"] == "YES", df["bet_side"] == "NO"],
@@ -576,17 +549,7 @@ else:
         | filtered["best_ev"].isna()
     ]
 
-calibration_error = None
-try:
-    filtered, trained_model, calibration_metrics = run_calibration_on_dashboard_df(filtered)
-except Exception as e:
-    calibration_error = e
-    trained_model = None
-    calibration_metrics = None
-
-if calibration_error is not None:
-    st.error("Calibration failed")
-    st.exception(calibration_error)
+filtered, trained_model, calibration_metrics = run_calibration_on_dashboard_df(filtered)
 
 if calibration_metrics is not None:
     st.sidebar.caption(
@@ -608,19 +571,9 @@ filtered["model_probability_for_bet"] = np.where(
 
 filtered["best_ev"] = np.where(
     filtered["bet_side"] == "YES",
-    filtered["calibrated_yes_edge"].fillna(filtered["yes_edge"]),
-    filtered["calibrated_no_edge"].fillna(filtered["no_edge"]),
+    filtered["calibrated_yes_edge"].fillna(filtered["yes_edge"]).abs(),
+    filtered["calibrated_no_edge"].fillna(filtered["no_edge"]).abs(),
 )
-
-filtered["prob_gap"] = (
-    filtered["calibrated_model_probability"].fillna(filtered["enhanced_model_probability"])
-    - filtered["implied_probability"]
-)
-filtered["abs_prob_gap"] = filtered["prob_gap"].abs()
-filtered["market_disagreement"] = np.where(
-    filtered["prob_gap"] > 0, "model_higher", "market_higher"
-)
-filtered["model_health_flag"] = filtered.apply(classify_model_health, axis=1)
 
 filtered["kelly_fraction_full"] = np.where(
     (filtered["bet_side"].isin(["YES", "NO"])) & (filtered["net_odds_for_bet"] > 0),
@@ -644,7 +597,7 @@ filtered["recommended_bet"] = filtered.apply(
     lambda row: watchlist_stake if row["row_type"] == "WATCHLIST" else compute_sane_recommended_bet(
         bankroll=float(bankroll),
         raw_kelly_bet=float(row.get("kelly_bet_raw", 0.0)),
-        edge=float(abs(row.get("best_ev", 0.0))),
+        edge=float(row.get("best_ev", 0.0)),
         calibrated_prob=float(row.get("calibrated_model_probability", 0.5)),
         calibration_metrics=calibration_metrics,
         min_bet_floor=float(min_bet_floor),
@@ -657,14 +610,24 @@ filtered["recommended_bet"] = filtered.apply(
 filtered["profit_if_win_recommended"] = filtered["recommended_bet"] * filtered["net_odds_for_bet"]
 filtered["expected_profit_recommended"] = np.where(
     filtered["row_type"] == "REAL BET",
-    filtered["recommended_bet"] * abs(filtered["best_ev"]),
+    filtered["recommended_bet"] * filtered["best_ev"],
     np.nan,
 )
 
+filtered["prob_gap"] = (
+    filtered["calibrated_model_probability"].fillna(filtered["enhanced_model_probability"])
+    - filtered["implied_probability"]
+)
+filtered["abs_prob_gap"] = filtered["prob_gap"].abs()
+filtered["market_disagreement"] = np.where(
+    filtered["prob_gap"] > 0, "model_higher", "market_higher"
+)
+filtered["model_health_flag"] = filtered.apply(classify_model_health, axis=1)
+
 filtered["bet_quality"] = np.select(
     [
-        (filtered["row_type"] == "REAL BET") & (abs(filtered["best_ev"]) >= 0.05),
-        (filtered["row_type"] == "REAL BET") & (abs(filtered["best_ev"]) >= 0.02),
+        (filtered["row_type"] == "REAL BET") & (filtered["best_ev"] >= 0.05),
+        (filtered["row_type"] == "REAL BET") & (filtered["best_ev"] >= 0.02),
         filtered["row_type"] == "WATCHLIST",
     ],
     [
@@ -677,7 +640,7 @@ filtered["bet_quality"] = np.select(
 
 filtered["sort_score"] = np.where(
     filtered["row_type"] == "REAL BET",
-    filtered["model_probability_for_bet"] * 0.7 + abs(filtered["best_ev"].fillna(0)) * 0.3,
+    filtered["model_probability_for_bet"] * 0.7 + filtered["best_ev"].fillna(0) * 0.3,
     filtered["confidence"]
 )
 
@@ -705,7 +668,7 @@ k1.metric("Markets", f"{len(display_df):,}")
 k2.metric("Supported", f"{supported_count:,}")
 k3.metric("Real bets", f"{len(real_bets_df):,}")
 k4.metric("Watchlist", f"{len(watchlist_df):,}")
-k5.metric("Avg real EV", f"{real_bets_df['best_ev'].abs().mean():.4f}" if len(real_bets_df) else "0.0000")
+k5.metric("Avg real EV", f"{real_bets_df['best_ev'].mean():.4f}" if len(real_bets_df) else "0.0000")
 
 k6, k7, k8, k9 = st.columns(4)
 k6.metric("Money in", f"${total_real_stake:,.2f}")
@@ -721,7 +684,8 @@ st.caption(f"Watchlist manual stake total: ${total_watchlist_stake:,.2f}")
 
 st.subheader("Model diagnostics")
 
-ev_corr = safe_corr(filtered.get("best_ev").abs(), filtered.get("model_probability_for_bet"))
+edge_corr = safe_corr(filtered.get("yes_edge"), filtered.get("calibrated_model_probability"))
+ev_corr = safe_corr(filtered.get("best_ev"), filtered.get("model_probability_for_bet"))
 
 d1, d2, d3, d4, d5 = st.columns(5)
 d1.metric("Avg prob gap", f"{filtered['abs_prob_gap'].mean():.4f}" if len(filtered) else "0.0000")
@@ -730,253 +694,8 @@ d3.metric("Calibration log loss", f"{calibration_metrics['log_loss']:.4f}" if ca
 d4.metric("Calibration Brier", f"{calibration_metrics['brier_score']:.4f}" if calibration_metrics else "N/A")
 d5.metric("EV correlation", f"{ev_corr:.4f}" if pd.notna(ev_corr) else "N/A")
 
-st.error("DEBUG: YOU REACHED BENCHMARK")
-st.subheader("Model benchmark")
-
-benchmark_df = filtered.copy()
-
-resolved_target_col = None
-for c in ["resolved_outcome", "actual_outcome", "settled_outcome", "result"]:
-    if c in benchmark_df.columns:
-        resolved_target_col = c
-        break
-
-benchmark_results_df = pd.DataFrame(columns=[
-    "model", "log_loss", "brier_score", "roc_auc", "avg_pred", "test_rows", "status"
-])
-
-benchmark_warning = None
-benchmark_caption = None
-
-if resolved_target_col is None:
-    benchmark_warning = (
-        "Benchmark disabled: no real resolved outcome column found. "
-        "Current YES/NO bet decisions are strategy outputs, not ground-truth labels."
-    )
-else:
-    benchmark_df["target"] = benchmark_df[resolved_target_col]
-
-    if benchmark_df["target"].dtype == "object":
-        benchmark_df["target"] = (
-            benchmark_df["target"]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .map({
-                "yes": 1, "true": 1, "1": 1,
-                "no": 0, "false": 0, "0": 0,
-            })
-        )
-
-    benchmark_df["target"] = pd.to_numeric(benchmark_df["target"], errors="coerce")
-
-    time_col = None
-    for c in ["ev_updated_at", "fetched_at"]:
-        if c in benchmark_df.columns:
-            benchmark_df[c] = pd.to_datetime(benchmark_df[c], errors="coerce")
-            if benchmark_df[c].notna().sum() > 0:
-                time_col = c
-                break
-
-    feature_cols = [
-        "implied_probability",
-        "model_probability",
-        "historical_probability",
-        "target_low",
-        "target_high",
-        "month_num",
-        "day_num",
-        "hour_24",
-    ]
-
-    model_benchmark = benchmark_df.dropna(subset=["target"]).copy()
-    model_benchmark = model_benchmark[model_benchmark["model_supported"]].copy()
-
-    for col in feature_cols:
-        if col not in model_benchmark.columns:
-            model_benchmark[col] = np.nan
-
-    def _group_text(v):
-        if pd.isna(v):
-            return "NA"
-        if isinstance(v, float):
-            return f"{v:.3f}"
-        return str(v).strip().lower()
-
-    model_benchmark["benchmark_group"] = model_benchmark.apply(
-        lambda row: " | ".join([
-            _group_text(row.get("question")),
-            _group_text(row.get("resolved_city")),
-            _group_text(row.get("market_family")),
-            _group_text(row.get("target_type")),
-            _group_text(row.get("target_low")),
-            _group_text(row.get("target_high")),
-        ]),
-        axis=1,
-    )
-
-    if len(model_benchmark) < 80:
-        benchmark_warning = f"Not enough resolved labeled rows for benchmark comparison yet ({len(model_benchmark)} rows)."
-    elif model_benchmark["target"].nunique() < 2:
-        benchmark_warning = "Benchmark needs both outcome classes in resolved data."
-    elif time_col is None:
-        benchmark_warning = "Benchmark skipped: no usable timestamp column for grouped time holdout."
-    else:
-        group_time_df = (
-            model_benchmark
-            .groupby("benchmark_group", as_index=False)[time_col]
-            .min()
-            .sort_values(time_col)
-            .reset_index(drop=True)
-        )
-
-        if len(group_time_df) < 10:
-            benchmark_warning = f"Benchmark skipped: not enough distinct resolved groups ({len(group_time_df)})."
-        else:
-            split_idx = int(len(group_time_df) * 0.80)
-            split_idx = max(1, min(split_idx, len(group_time_df) - 1))
-
-            train_groups = set(group_time_df.iloc[:split_idx]["benchmark_group"])
-            test_groups = set(group_time_df.iloc[split_idx:]["benchmark_group"])
-
-            train_df = model_benchmark[model_benchmark["benchmark_group"].isin(train_groups)].copy()
-            test_df = model_benchmark[model_benchmark["benchmark_group"].isin(test_groups)].copy()
-
-            if len(train_df) < 50 or len(test_df) < 20:
-                benchmark_warning = (
-                    f"Benchmark skipped: grouped train/test split too small "
-                    f"(train={len(train_df)}, test={len(test_df)})."
-                )
-            elif train_df["target"].nunique() < 2 or test_df["target"].nunique() < 2:
-                benchmark_warning = "Benchmark skipped: both grouped train and test need both outcome classes."
-            else:
-                X_train = train_df[feature_cols].copy()
-                y_train = train_df["target"].astype(int).copy()
-                X_test = test_df[feature_cols].copy()
-                y_test = test_df["target"].astype(int).copy()
-
-                imputer = SimpleImputer(strategy="median")
-                X_train_imp = imputer.fit_transform(X_train)
-                X_test_imp = imputer.transform(X_test)
-
-                benchmark_rows = []
-
-                models = {
-                    "Baseline": DummyClassifier(strategy="prior"),
-                    "Random Forest": RandomForestClassifier(
-                        n_estimators=200,
-                        max_depth=6,
-                        min_samples_leaf=10,
-                        random_state=42,
-                        n_jobs=-1,
-                    ),
-                }
-
-                if HAS_XGBOOST:
-                    models["XGBoost"] = XGBClassifier(
-                        n_estimators=200,
-                        max_depth=4,
-                        learning_rate=0.05,
-                        subsample=0.8,
-                        colsample_bytree=0.8,
-                        reg_lambda=1.0,
-                        eval_metric="logloss",
-                        random_state=42,
-                    )
-
-                for model_name, model in models.items():
-                    try:
-                        model.fit(X_train_imp, y_train)
-                        pred_prob = model.predict_proba(X_test_imp)[:, 1]
-                        pred_prob = np.clip(pred_prob, 1e-6, 1 - 1e-6)
-
-                        benchmark_rows.append({
-                            "model": model_name,
-                            "log_loss": float(log_loss(y_test, pred_prob)),
-                            "brier_score": float(brier_score_loss(y_test, pred_prob)),
-                            "roc_auc": float(roc_auc_score(y_test, pred_prob)),
-                            "avg_pred": float(np.mean(pred_prob)),
-                            "test_rows": int(len(y_test)),
-                            "status": "ok",
-                        })
-                    except Exception as model_error:
-                        benchmark_rows.append({
-                            "model": model_name,
-                            "log_loss": np.nan,
-                            "brier_score": np.nan,
-                            "roc_auc": np.nan,
-                            "avg_pred": np.nan,
-                            "test_rows": int(len(y_test)),
-                            "status": f"error: {str(model_error)[:80]}",
-                        })
-
-                benchmark_results_df = pd.DataFrame(benchmark_rows)
-
-                if not benchmark_results_df.empty:
-                    benchmark_results_df = benchmark_results_df.sort_values(
-                        by=["log_loss", "brier_score"],
-                        ascending=[True, True],
-                        na_position="last"
-                    ).reset_index(drop=True)
-
-                benchmark_caption = (
-                    f"Resolved grouped holdout: trained on {len(train_groups)} oldest groups / {len(train_df)} rows, "
-                    f"tested on {len(test_groups)} newest groups / {len(test_df)} rows using `{time_col}`."
-                )
-
-if benchmark_warning:
-    st.warning(benchmark_warning)
-
-if benchmark_caption:
-    st.caption(benchmark_caption)
-
-if not benchmark_results_df.empty:
-    valid_logloss = benchmark_results_df.dropna(subset=["log_loss"])
-    valid_brier = benchmark_results_df.dropna(subset=["brier_score"])
-    valid_auc = benchmark_results_df.dropna(subset=["roc_auc"])
-
-    b1, b2, b3 = st.columns(3)
-
-    if not valid_logloss.empty:
-        best_logloss_row = valid_logloss.sort_values("log_loss").iloc[0]
-        b1.metric("Best log loss", f"{best_logloss_row['log_loss']:.4f}")
-        b1.caption(f"Winner: {best_logloss_row['model']}")
-    else:
-        b1.metric("Best log loss", "N/A")
-        b1.caption("Winner: none")
-
-    if not valid_brier.empty:
-        best_brier_row = valid_brier.sort_values("brier_score").iloc[0]
-        b2.metric("Best Brier", f"{best_brier_row['brier_score']:.4f}")
-        b2.caption(f"Winner: {best_brier_row['model']}")
-    else:
-        b2.metric("Best Brier", "N/A")
-        b2.caption("Winner: none")
-
-    if not valid_auc.empty:
-        best_auc_row = valid_auc.sort_values("roc_auc", ascending=False).iloc[0]
-        b3.metric("Best ROC AUC", f"{best_auc_row['roc_auc']:.4f}")
-        b3.caption(f"Winner: {best_auc_row['model']}")
-    else:
-        b3.metric("Best ROC AUC", "N/A")
-        b3.caption("Winner: none")
-
-    st.dataframe(
-        benchmark_results_df,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "model": st.column_config.TextColumn("Model"),
-            "log_loss": st.column_config.NumberColumn("Log loss", format="%.4f"),
-            "brier_score": st.column_config.NumberColumn("Brier", format="%.4f"),
-            "roc_auc": st.column_config.NumberColumn("ROC AUC", format="%.4f"),
-            "avg_pred": st.column_config.NumberColumn("Avg pred", format="%.4f"),
-            "test_rows": st.column_config.NumberColumn("Test rows", format="%d"),
-            "status": st.column_config.TextColumn("Status", width="medium"),
-        }
-    )
-else:
-    st.caption("No trustworthy benchmark results to display yet.")
+if "yes_edge" in filtered.columns and filtered["yes_edge"].fillna(0).nunique() <= 1:
+    st.warning("Edge column has little or no variance in the current slice, so edge-based correlation is not reliable.")
 
 c1, c2 = st.columns(2)
 
@@ -1043,9 +762,9 @@ with c4:
     ev_df = filtered.dropna(subset=["best_ev"])
     if len(ev_df):
         fig_ev = px.box(
-            ev_df.assign(best_ev_abs=ev_df["best_ev"].abs()),
+            ev_df,
             x="display_side",
-            y="best_ev_abs",
+            y="best_ev",
             color="row_type",
             points="outliers",
             title="Expected value by chosen side"
@@ -1069,11 +788,16 @@ show_cols = [
     "model_supported",
     "implied_probability",
     "enhanced_model_probability",
+    "calibrated_model_probability",
     "best_ev",
+    "prob_gap",
+    "market_disagreement",
+    "model_health_flag",
     "bet_quality",
     "confidence",
     "recommended_bet",
     "expected_profit_recommended",
+    "reason",
 ]
 
 st.dataframe(
@@ -1084,18 +808,23 @@ st.dataframe(
         "question": st.column_config.TextColumn("Question", width="large"),
         "row_type": st.column_config.TextColumn("Type", width="small"),
         "display_side": st.column_config.TextColumn("Side", width="small"),
-        "market_family": st.column_config.TextColumn("Family"),
+        "market_family": st.column_config.TextColumn("Model Family"),
         "resolved_city": st.column_config.TextColumn("City"),
-        "target_type": st.column_config.TextColumn("Type"),
-        "target_low": st.column_config.NumberColumn("Low", format="%.1f"),
-        "target_high": st.column_config.NumberColumn("High", format="%.1f"),
-        "model_supported": st.column_config.CheckboxColumn("✓"),
-        "implied_probability": st.column_config.NumberColumn("Market %", format="%.3f"),
-        "enhanced_model_probability": st.column_config.NumberColumn("Model %", format="%.3f"),
-        "best_ev": st.column_config.NumberColumn("EV", format="%.3f"),
-        "bet_quality": st.column_config.TextColumn("Quality"),
-        "confidence": st.column_config.NumberColumn("Conf.", format="%.3f"),
-        "recommended_bet": st.column_config.NumberColumn("Bet", format="$%.2f"),
-        "expected_profit_recommended": st.column_config.NumberColumn("Exp Profit", format="$%.2f"),
+        "target_type": st.column_config.TextColumn("Target Type"),
+        "target_low": st.column_config.NumberColumn("Low", format="%.2f"),
+        "target_high": st.column_config.NumberColumn("High", format="%.2f"),
+        "model_supported": st.column_config.CheckboxColumn("Supported"),
+        "implied_probability": st.column_config.NumberColumn("Market Prob", format="%.4f"),
+        "enhanced_model_probability": st.column_config.NumberColumn("Model Prob", format="%.4f"),
+        "calibrated_model_probability": st.column_config.NumberColumn("Calibrated Prob", format="%.4f"),
+        "best_ev": st.column_config.NumberColumn("EV", format="%.4f"),
+        "prob_gap": st.column_config.NumberColumn("Prob Gap", format="%.4f"),
+        "market_disagreement": st.column_config.TextColumn("Gap Direction"),
+        "model_health_flag": st.column_config.TextColumn("Health"),
+        "bet_quality": st.column_config.TextColumn("Bet Quality"),
+        "confidence": st.column_config.NumberColumn("Confidence", format="%.4f"),
+        "recommended_bet": st.column_config.NumberColumn("Rec Bet ($)", format="$%.2f"),
+        "expected_profit_recommended": st.column_config.NumberColumn("Exp Profit ($)", format="$%.2f"),
+        "reason": st.column_config.TextColumn("Reason", width="large"),
     }
 )
