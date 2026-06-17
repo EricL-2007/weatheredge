@@ -1,0 +1,24 @@
+
+WeatherEdge Evaluation Report
+=============================
+
+Classification (Logistic Regression):
+  Accuracy: 0.5521
+  F1 score: 0.3768
+  ROC AUC: 0.5631
+
+Classification (XGBoost):
+  Accuracy: 0.6823
+  F1 score: 0.3297
+  ROC AUC: 0.6081
+
+Temperature Regression (XGBoost):
+  MAE: 1.9577
+  RMSE: 2.4389
+  R^2: 0.5794
+
+Key findings:
+- XGBoost outperforms logistic regression for rain prediction (accuracy 0.68 vs 0.55, ROC AUC 0.61 vs 0.56).
+- Temperature prediction MAE ≈ 1.96°C, RMSE ≈ 2.44°C, R² ≈ 0.58.
+- Calibration reduced Brier score from 0.44 to 0.28 and ECE from 0.45 to 0.26.
+- SHAP shows pressure, day_of_week, and humidity are strongest local drivers.
