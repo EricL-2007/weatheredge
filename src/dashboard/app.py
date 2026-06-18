@@ -34,7 +34,8 @@ from src.models.weather_calibration import (
     compute_sane_recommended_bet,
 )
 
-load_dotenv(".env", override=True)
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(), override=True)
 
 st.set_page_config(page_title="WeatherEdge Dashboard", layout="wide")
 
@@ -732,7 +733,7 @@ d3.metric("Calibration log loss", f"{calibration_metrics['log_loss']:.4f}" if ca
 d4.metric("Calibration Brier", f"{calibration_metrics['brier_score']:.4f}" if calibration_metrics else "N/A")
 d5.metric("EV correlation", f"{ev_corr:.4f}" if pd.notna(ev_corr) else "N/A")
 
-st.error("DEBUG: YOU REACHED BENCHMARK")
+#st.error("DEBUG: YOU REACHED BENCHMARK")
 st.subheader("Model benchmark")
 
 benchmark_df = filtered.copy()
