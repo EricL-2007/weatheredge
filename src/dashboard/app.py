@@ -23,6 +23,13 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import log_loss, brier_score_loss, roc_auc_score
 from sklearn.model_selection import train_test_split
 
+load_dotenv(".env", override=True)
+
+DB_URL = st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL"))
+if not DB_URL:
+    st.error("DATABASE_URL is missing from .env or Streamlit secrets")
+    st.stop()
+
 try:
     from xgboost import XGBClassifier
     HAS_XGBOOST = True
