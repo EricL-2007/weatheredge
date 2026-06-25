@@ -23,6 +23,14 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import log_loss, brier_score_loss, roc_auc_score
 from sklearn.model_selection import train_test_split
 
+load_dotenv(override=True)
+
+st.set_page_config(page_title="WeatherEdge Dashboard", layout="wide")
+
+DB_URL = st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL"))
+if not DB_URL:
+    st.error("DATABASE_URL is missing from Streamlit secrets or .env")
+    st.stop()
 
 try:
     from xgboost import XGBClassifier
@@ -34,15 +42,6 @@ from src.models.weather_calibration import (
     run_calibration_on_dashboard_df,
     compute_sane_recommended_bet,
 )
-
-load_dotenv(find_dotenv(), override=True)
-
-st.set_page_config(page_title="WeatherEdge Dashboard", layout="wide")
-
-DB_URL = st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL"))
-if not DB_URL:
-    st.error("DATABASE_URL is missing from Streamlit secrets or .env")
-    st.stop()
 
 engine = create_engine(DB_URL, pool_pre_ping=True)
 
@@ -733,7 +732,6 @@ d3.metric("Calibration log loss", f"{calibration_metrics['log_loss']:.4f}" if ca
 d4.metric("Calibration Brier", f"{calibration_metrics['brier_score']:.4f}" if calibration_metrics else "N/A")
 d5.metric("EV correlation", f"{ev_corr:.4f}" if pd.notna(ev_corr) else "N/A")
 
-#st.error("DEBUG: YOU REACHED BENCHMARK")
 st.subheader("Model benchmark")
 
 benchmark_df = filtered.copy()
@@ -966,7 +964,7 @@ if not benchmark_results_df.empty:
 
     st.dataframe(
         benchmark_results_df,
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
         column_config={
             "model": st.column_config.TextColumn("Model"),
