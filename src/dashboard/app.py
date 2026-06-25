@@ -23,12 +23,6 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import log_loss, brier_score_loss, roc_auc_score
 from sklearn.model_selection import train_test_split
 
-load_dotenv(".env", override=True)
-
-DB_URL = st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL"))
-if not DB_URL:
-    st.error("DATABASE_URL is missing from .env or Streamlit secrets")
-    st.stop()
 
 try:
     from xgboost import XGBClassifier
@@ -41,14 +35,13 @@ from src.models.weather_calibration import (
     compute_sane_recommended_bet,
 )
 
-from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv(), override=True)
 
 st.set_page_config(page_title="WeatherEdge Dashboard", layout="wide")
 
-DB_URL = os.getenv("DATABASE_URL")
+DB_URL = st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL"))
 if not DB_URL:
-    st.error("DATABASE_URL is missing from .env")
+    st.error("DATABASE_URL is missing from Streamlit secrets or .env")
     st.stop()
 
 engine = create_engine(DB_URL, pool_pre_ping=True)
