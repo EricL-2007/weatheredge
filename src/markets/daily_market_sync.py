@@ -40,7 +40,7 @@ def get_engine():
 
 def ensure_market_table(engine):
     create_sql = """
-    CREATE TABLE IF NOT EXISTS market_data (
+    CREATE TABLE IF NOT EXISTS public.market_data (
         id SERIAL PRIMARY KEY,
         source VARCHAR(50),
         market_id VARCHAR(255) UNIQUE,
@@ -52,6 +52,10 @@ def ensure_market_table(engine):
         yes_bid_price FLOAT,
         last_price FLOAT,
         implied_probability FLOAT,
+        model_probability FLOAT,
+        edge FLOAT,
+        ev_yes FLOAT,
+        price_used FLOAT,
         volume FLOAT,
         open_interest FLOAT,
         status VARCHAR(50),
@@ -60,22 +64,55 @@ def ensure_market_table(engine):
         market_type VARCHAR(50),
         city_name VARCHAR(100),
         raw_response JSONB,
-        fetched_at TIMESTAMP
+        fetched_at TIMESTAMP,
+        ev_updated_at TIMESTAMP
     );
     """
 
     alter_statements = [
-        "ALTER TABLE market_data ADD COLUMN IF NOT EXISTS series_ticker VARCHAR(255);",
-        "ALTER TABLE market_data ADD COLUMN IF NOT EXISTS category VARCHAR(100);",
-        "ALTER TABLE market_data ADD COLUMN IF NOT EXISTS market_type VARCHAR(50);",
-        "ALTER TABLE market_data ADD COLUMN IF NOT EXISTS city_name VARCHAR(100);",
-        "ALTER TABLE market_data ADD COLUMN IF NOT EXISTS raw_response JSONB;"
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS source VARCHAR(50);",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS market_id VARCHAR(255);",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS event_ticker VARCHAR(255);",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS series_ticker VARCHAR(255);",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS question TEXT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS subtitle TEXT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS yes_ask_price FLOAT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS yes_bid_price FLOAT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS last_price FLOAT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS implied_probability FLOAT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS model_probability FLOAT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS edge FLOAT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS ev_yes FLOAT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS price_used FLOAT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS volume FLOAT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS open_interest FLOAT;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS status VARCHAR(50);",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS category VARCHAR(100);",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS close_date TIMESTAMP;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS market_type VARCHAR(50);",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS city_name VARCHAR(100);",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS raw_response JSONB;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMP;",
+        "ALTER TABLE public.market_data ADD COLUMN IF NOT EXISTS ev_updated_at TIMESTAMP;",
     ]
 
     with engine.begin() as conn:
         conn.execute(text(create_sql))
         for stmt in alter_statements:
             conn.execute(text(stmt))
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'market_data_market_id_key'
+                ) THEN
+                    ALTER TABLE public.market_data
+                    ADD CONSTRAINT market_data_market_id_key UNIQUE (market_id);
+                END IF;
+            END $$;
+        """))
 
 def get_json(url, params=None, retries=3):
     headers = {"Accept": "application/json", "User-Agent": "weatheredge/1.0"}
@@ -170,6 +207,12 @@ def normalize_market(m, forced_series_ticker=None):
 
     meta = classify_market(question, subtitle)
 
+    model_probability = implied_probability
+    edge = 0.0 if implied_probability is not None else None
+    ev_yes = 0.0 if implied_probability is not None else None
+    price_used = last_price
+    now_utc = datetime.now(timezone.utc)
+
     return {
         "source": "kalshi",
         "market_id": m.get("ticker"),
@@ -181,6 +224,10 @@ def normalize_market(m, forced_series_ticker=None):
         "yes_bid_price": m.get("yes_bid") or m.get("yes_bid_dollars"),
         "last_price": last_price,
         "implied_probability": implied_probability,
+        "model_probability": model_probability,
+        "edge": edge,
+        "ev_yes": ev_yes,
+        "price_used": price_used,
         "volume": m.get("volume") or m.get("volume_dollars"),
         "open_interest": m.get("open_interest") or m.get("open_interest_fp"),
         "status": m.get("status") or "active",
@@ -189,22 +236,25 @@ def normalize_market(m, forced_series_ticker=None):
         "market_type": meta["market_type"],
         "city_name": meta["city_name"],
         "raw_response": Json(m),
-        "fetched_at": datetime.now(timezone.utc)
+        "fetched_at": now_utc,
+        "ev_updated_at": now_utc,
     }
 
-def upsert_markets(engine, rows):
+def upsert_markets(engine, rows, batch_size=500):
     sql = text("""
-        INSERT INTO market_data (
+        INSERT INTO public.market_data (
             source, market_id, event_ticker, series_ticker, question, subtitle,
             yes_ask_price, yes_bid_price, last_price, implied_probability,
+            model_probability, edge, ev_yes, price_used,
             volume, open_interest, status, category, close_date,
-            market_type, city_name, raw_response, fetched_at
+            market_type, city_name, raw_response, fetched_at, ev_updated_at
         )
         VALUES (
             :source, :market_id, :event_ticker, :series_ticker, :question, :subtitle,
             :yes_ask_price, :yes_bid_price, :last_price, :implied_probability,
+            :model_probability, :edge, :ev_yes, :price_used,
             :volume, :open_interest, :status, :category, :close_date,
-            :market_type, :city_name, :raw_response, :fetched_at
+            :market_type, :city_name, :raw_response, :fetched_at, :ev_updated_at
         )
         ON CONFLICT (market_id)
         DO UPDATE SET
@@ -216,6 +266,10 @@ def upsert_markets(engine, rows):
             yes_bid_price = EXCLUDED.yes_bid_price,
             last_price = EXCLUDED.last_price,
             implied_probability = EXCLUDED.implied_probability,
+            model_probability = EXCLUDED.model_probability,
+            edge = EXCLUDED.edge,
+            ev_yes = EXCLUDED.ev_yes,
+            price_used = EXCLUDED.price_used,
             volume = EXCLUDED.volume,
             open_interest = EXCLUDED.open_interest,
             status = EXCLUDED.status,
@@ -224,12 +278,16 @@ def upsert_markets(engine, rows):
             market_type = EXCLUDED.market_type,
             city_name = EXCLUDED.city_name,
             raw_response = EXCLUDED.raw_response,
-            fetched_at = EXCLUDED.fetched_at
+            fetched_at = EXCLUDED.fetched_at,
+            ev_updated_at = EXCLUDED.ev_updated_at
     """)
 
+    total = len(rows)
     with engine.begin() as conn:
-        for row in rows:
-            conn.execute(sql, row)
+        for i in range(0, total, batch_size):
+            batch = rows[i:i + batch_size]
+            conn.execute(sql, batch)
+            print(f"Upserted batch {i + 1}-{min(i + batch_size, total)} of {total}")
 
 def main():
     print("Connecting to database...")

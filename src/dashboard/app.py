@@ -16,13 +16,13 @@ import plotly.express as px
 import streamlit as st
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from streamlit.errors import StreamlitSecretNotFoundError
 
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import log_loss, brier_score_loss, roc_auc_score
 from sklearn.model_selection import train_test_split
-
 
 try:
     from xgboost import XGBClassifier
@@ -39,9 +39,32 @@ load_dotenv(override=True)
 
 st.set_page_config(page_title="WeatherEdge Dashboard", layout="wide")
 
-DB_URL = st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL"))
+
+def get_database_url():
+    env_url = os.getenv("DATABASE_URL")
+    if env_url:
+        return env_url
+
+    try:
+        if "DATABASE_URL" in st.secrets:
+            return st.secrets["DATABASE_URL"]
+    except StreamlitSecretNotFoundError:
+        return None
+    except KeyError:
+        return None
+
+    return None
+
+
+DB_URL = get_database_url()
+
 if not DB_URL:
-    st.error("DATABASE_URL is missing from Streamlit secrets or .env")
+    st.error(
+        "DATABASE_URL is missing. Add it to .env for local runs or Streamlit secrets for deployed runs."
+    )
+    st.code(
+        'DATABASE_URL="postgresql+psycopg2://postgres:YOUR_ENCODED_PASSWORD@aws-1-us-west-2.pooler.supabase.com:6543/postgres?sslmode=require"'
+    )
     st.stop()
 
 engine = create_engine(DB_URL, pool_pre_ping=True)
@@ -79,7 +102,7 @@ def load_data():
         price_used,
         fetched_at,
         ev_updated_at
-    FROM market_data
+    FROM public.market_data
     WHERE category = 'climate'
       AND implied_probability IS NOT NULL
       AND model_probability IS NOT NULL

@@ -49,3 +49,8 @@ output/
 *.sqlite
 *.db
 *.csv~
+.venv/
+.env
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
