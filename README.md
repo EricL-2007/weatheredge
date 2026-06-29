@@ -1,60 +1,63 @@
 # WeatherEdge
 
-WeatherEdge is a Python, PostgreSQL, and Streamlit dashboard for identifying positive expected-value opportunities in weather prediction markets. It loads market data from a local database, applies model-driven probability estimates, calibrates those probabilities conservatively, and ranks opportunities with bankroll-aware bet sizing.
+WeatherEdge is a probabilistic weather market decision intelligence platform built with Python, Supabase (PostgreSQL), and Streamlit. It scrapes live climate prediction markets from Kalshi, stores them in a Supabase-hosted PostgreSQL database via daily sync, applies a multi-signal probability model with conservative calibration, and surfaces bankroll-aware bet recommendations through an interactive dashboard deployed on Streamlit Cloud.
 
 ## Features
 
-- Interactive dashboard built with Streamlit
-- PostgreSQL-backed market storage
-- Market filtering by city, market type, model family, and bet rules
-- Conservative probability calibration
-- Expected value and bankroll-based bet sizing
-- KPI summary cards for money in, expected profit, and ROI
-- "Real bet" vs watchlist workflow
+- Daily Kalshi API scrape across 322 climate-related series with batch upsert into Supabase
+- Streamlit dashboard deployed on Streamlit Cloud with live Supabase connection
+- Market filtering by city, market type, model family, and configurable bet rules
+- Multi-signal model combining historical temperature baselines, market-implied probabilities, and existing model estimates
+- Conservative shrinkage calibration with log loss and Brier score diagnostics
+- Kelly-fractional bet sizing with real-bet vs. watchlist workflow
+- Plotly charts: model vs. market scatter, probability gap distribution, EV by side, model family breakdown
+- ML benchmark suite (Random Forest, XGBoost, Baseline) on resolved outcomes when available
 
 ## Stack
 
 - Python
-- PostgreSQL
-- SQLAlchemy
-- pandas
-- numpy
+- Supabase (PostgreSQL)
+- SQLAlchemy + psycopg2
+- Streamlit (deployed on Streamlit Cloud)
 - scikit-learn
+- XGBoost
 - Plotly
-- Streamlit
-- psycopg2
+- pandas / numpy
+- Kalshi Trade API v2
 - python-dotenv
 
-## Project structure
+## How it works
 
-```text
-weatheredge/
-├── src/
-│   ├── __init__.py
-│   ├── dashboard/
-│   │   ├── __init__.py
-│   │   └── app.py
-│   ├── models/
-│   │   ├── __init__.py
-│   │   └── weather_calibration.py
-│   └── jobs/
-│       └── daily_sync.py
-├── .env.example
-├── .gitignore
-├── requirements.txt
-└── README.md
-```
+### Daily sync (`src/jobs/daily_sync.py`)
 
-## What it does
+1. Fetches all Kalshi series (~11,000+) from the Trade API v2
+2. Filters to 322 climate-related series using keyword matching on title, subtitle, ticker, and category
+3. Fetches all markets for each matched series (up to 500 per series)
+4. Normalizes each market (extracts question, prices, implied probability, city, market type)
+5. Upserts all rows into `public.market_data` in Supabase in batches of 500
 
-The dashboard reads weather market rows from PostgreSQL, filters the market universe, and computes calibrated opportunities for decision support. The current version uses conservative shrinkage calibration rather than expensive live historical API calibration so the app stays fast and stable during reruns.
+A typical run inserts/updates ~18,000 market rows.
+
+### Dashboard (`app.py`)
+
+The dashboard loads climate markets from Supabase, then for each market:
+
+- **Parses** the question text for thresholds, date/time, and direction (greater than / less than / range)
+- **Infers city** from question text or the `city_name` column
+- **Estimates hourly temperature** using city-specific seasonal baselines and a diurnal curve
+- **Computes historical probability** via normal CDF over the estimated temperature distribution
+- **Blends** historical probability (65%), market probability (10%), and stored model probability (25%) into an enhanced model estimate
+- **Calibrates** the enhanced estimate using shrinkage toward market and coin-flip
+- **Computes edge** for YES and NO sides; assigns bet direction based on configurable thresholds
+- **Sizes bets** using fractional Kelly with floor and cap constraints
+- **Classifies rows** as REAL BET or WATCHLIST based on edge and win probability filters
 
 ## Setup
 
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/weatheredge.git
+git clone https://github.com/EricL-2007/weatheredge.git
 cd weatheredge
 ```
 
@@ -78,24 +81,29 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set:
+Set your Supabase connection string:
 
-```env
-DATABASE_URL=postgresql+psycopg2://YOUR_USERNAME@localhost:5432/weatheredge
+```
+DATABASE_URL=postgresql+psycopg2://postgres:YOUR_ENCODED_PASSWORD@aws-1-us-west-2.pooler.supabase.com:6543/postgres?sslmode=require
 ```
 
-### 5. Make sure PostgreSQL is available
+For Streamlit Cloud deployment, add `DATABASE_URL` to your app's Streamlit secrets instead.
+
+### 5. Run the daily sync
 
 ```bash
-psql -h localhost -p 5432 -U YOUR_USERNAME -d weatheredge -c "SELECT COUNT(*) FROM market_data;"
+PYTHONPATH=. python -m src.jobs.daily_sync
 ```
 
-## Run the dashboard
+### 6. Run the dashboard
 
 ```bash
-source .venv/bin/activate
-PYTHONPATH=. streamlit run src/dashboard/app.py
+PYTHONPATH=. streamlit run app.py
 ```
+
+## Live app
+
+[https://el2007weatheredge.streamlit.app](https://el2007weatheredge.streamlit.app)
 
 ## Daily workflow
 
@@ -105,87 +113,58 @@ PYTHONPATH=. streamlit run src/dashboard/app.py
 cd ~/weatheredge
 source .venv/bin/activate
 git pull origin main
-python -m src.jobs.daily_sync
-streamlit run src/dashboard/app.py
-```
-
-### In the dashboard
-
-Review these every day:
-
-- Market count
-- Supported market count
-- Real bets vs watchlist
-- Average real EV
-- Money in
-- Expected profit
-- Expected ROI
-- Top ranked opportunities
-
-### Midday refresh
-
-```bash
-cd ~/weatheredge
-source .venv/bin/activate
-python -m src.jobs.daily_sync
-streamlit cache clear
-streamlit run src/dashboard/app.py
+PYTHONPATH=. python -m src.jobs.daily_sync
+PYTHONPATH=. streamlit run app.py
 ```
 
 ### End of day
 
 ```bash
-cd ~/weatheredge
-git status
 git add .
 git commit -m "Daily WeatherEdge update"
 git push origin main
 ```
 
-## Current calibration approach
+## Calibration approach
 
-The current version uses conservative shrinkage calibration (toward market probability and coin-flip) instead of row-by-row historical weather API calls in the dashboard. This keeps runtime fast and avoids unstable rerun behavior while still reducing overconfidence in raw model outputs.
+The current calibration uses conservative shrinkage (blending toward market probability and 0.5) rather than row-by-row historical API calls. This keeps the dashboard fast and stable across reruns while reducing overconfidence in raw model outputs. Calibration quality is reported as log loss and Brier score in the sidebar and diagnostics panel.
+
+## ML benchmark
+
+When a resolved outcome column (`resolved_outcome`, `actual_outcome`, etc.) is present in the database, the dashboard runs a grouped time-holdout benchmark comparing:
+
+- **Baseline** (prior class frequency)
+- **Random Forest** (200 trees, max depth 6)
+- **XGBoost** (200 rounds, learning rate 0.05)
+
+Models are trained on the oldest 80% of resolved market groups and tested on the newest 20%, using features including implied probability, historical probability, threshold values, and date/time components.
 
 ## Current limitations
 
-- Calibration is conservative, not a full historical backtest
-- Bet sizing is intentionally capped and simplified
-- The dashboard is best used as a screening and prioritization tool
-- Some payout assumptions may still need refinement
+- Calibration is shrinkage-based, not a full historical backtest
+- Temperature model covers 10 cities with seasonal baselines; non-temperature market families are unsupported
+- Benchmark requires resolved ground-truth outcomes not yet available at scale
+- Bet sizing is capped and simplified
 
 ## Recommended next improvements
 
 - CSV export of filtered bets
-- Better default visible columns
-- Top 10 / 25 / 50 row presets
+- Expanded city and market family coverage
+- Backtested calibration using Open-Meteo historical API
 - Daily logging of reviewed opportunities
-- More robust payout-aware Kelly sizing
-- Backtested calibration outside the live dashboard
+- Automated outcome resolution pipeline
 
 ## Security notes
 
 Do not commit:
+
 - `.env`
 - `.venv/`
-- database credentials
-- local logs
-- local output files
+- Database credentials
+- Local logs or output files
 
 Use `.env.example` for safe public configuration guidance.
 
-## Resume framing
-
-This project is a good portfolio piece for:
-- data engineering
-- analytics engineering
-- quant-style modeling
-- dashboard development
-- decision-support tooling
-
-Suggested framing:
-
-> Built a Python + PostgreSQL + Streamlit dashboard for weather prediction markets that computed model-vs-market edge, applied conservative probability calibration, and generated bankroll-aware bet recommendations with KPI reporting.
-
 ## License
 
-Add a license before sharing publicly. MIT is a common simple choice for portfolio repositories.
+MIT
